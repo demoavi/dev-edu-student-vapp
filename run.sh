@@ -100,6 +100,24 @@ wait_ready() {
   log "${site}: ${controller} ready"
 }
 
+# check_inventory <site> <inventory-file>: ask Ansible itself which hosts the group selsc_<site> has and
+# compare with the hosts the vars file lists. Guards against an inventory that fails to load, in which case
+# a play targeting the group is just "skipped: no hosts matched" and would otherwise be reported as OK.
+check_inventory() {
+  local site=$1 inv=$2 expected seen
+  expected="$(site_host_addresses "${site}" | wc -l)"
+  seen="$(ansible-inventory -i "${inv}" --list 2>/dev/null | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    print(-1); sys.exit()
+print(len(d.get(sys.argv[1], {}).get("hosts", [])))' "selsc_${site}")"
+  if [ "${seen}" != "${expected}" ]; then
+    log "${site}: the inventory does not load as expected: group selsc_${site} has ${seen} host(s) for Ansible, ${expected} listed in the CR"
+    return 1
+  fi
+}
+
 host_ssh_ready() { timeout 5 bash -c "exec 3<>/dev/tcp/${1}/${HOST_SSH_PORT}" 2>/dev/null; }
 
 # wait_hosts <site>: SSH port of every host of the site answers
@@ -124,7 +142,7 @@ failed=0
 log "started: sites=[${SITES}] playbooks=[${PLAYBOOKS}]"
 for site in ${SITES}; do
   extra="$(mktemp "${STATE_DIR}/vars.XXXXXX")"
-  inventory="$(mktemp "${STATE_DIR}/inventory.XXXXXX")"
+  inventory="$(mktemp --suffix=.json "${STATE_DIR}/inventory.XXXXXX")"   # the .json extension is required: without it Ansible falls back to the ini plugin and silently sees no hosts
   key="$(mktemp "${STATE_DIR}/key.XXXXXX")"
   cleanup() { rm -f "${extra}" "${inventory}" "${key}"; }
   site_vars "${site}" "${extra}"
@@ -143,6 +161,7 @@ for site in ${SITES}; do
     fi
     if [[ " ${needs} " == *" hosts "* ]] && [ "${hosts_ready_flag}" = "0" ]; then
       if ! wait_hosts "${site}"; then log "${site}: ${playbook} FAILED (hosts not reachable)"; failed=$((failed + 1)); break; fi
+      if ! check_inventory "${site}" "${inventory}"; then log "${site}: ${playbook} FAILED (inventory)"; failed=$((failed + 1)); break; fi
       hosts_ready_flag=1
     fi
     log "${site}: running ${playbook} (needs: ${needs})"
