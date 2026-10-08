@@ -1,0 +1,50 @@
+---
+# First step for one Avi controller: make sure the admin password is the one we want.
+# Derived from dev-avi-edu's build/ansible/sa/sa.yaml (its first task), with every value taken
+# from the environment instead of being hardcoded. Safe to re-run: if the new password already
+# logs in, nothing is changed. Run by ../run.sh once per controller (AVI_CONTROLLER).
+# NOT TESTED against a controller yet.
+- hosts: localhost
+  gather_facts: false
+  collections:
+    - vmware.alb
+
+  vars:
+    controller: "{{ lookup('env', 'AVI_CONTROLLER') }}"
+    avi_version: "{{ lookup('env', 'AVI_VERSION') }}"
+    avi_username: "{{ lookup('env', 'AVI_USERNAME') | default('admin', true) }}"
+    avi_password: "{{ lookup('env', 'AVI_PASSWORD') }}"
+    avi_old_password: "{{ lookup('env', 'AVI_OLD_PASSWORD') }}"
+
+  tasks:
+    - name: All required environment variables are set
+      ansible.builtin.assert:
+        that:
+          - controller | length > 0
+          - avi_version | length > 0
+          - avi_password | length > 0
+          - avi_old_password | length > 0
+        fail_msg: "AVI_CONTROLLER, AVI_VERSION, AVI_PASSWORD and AVI_OLD_PASSWORD must be set"
+
+    - name: Check whether the new admin password already works
+      ansible.builtin.uri:
+        url: "https://{{ controller }}/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ avi_username }}"
+          password: "{{ avi_password }}"
+        validate_certs: false
+        status_code: [200, 401, 403]
+      register: login_check
+      no_log: true
+
+    - name: Update user admin password
+      vmware.alb.avi_useraccount:
+        controller: "{{ controller }}"
+        username: "{{ avi_username }}"
+        password: "{{ avi_password }}"
+        old_password: "{{ avi_old_password }}"
+        api_version: "{{ avi_version }}"
+      when: login_check.status != 200
+      no_log: true
