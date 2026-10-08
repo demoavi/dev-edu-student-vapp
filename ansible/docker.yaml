@@ -1,0 +1,33 @@
+---
+# needs: hosts
+# First step per site: install Docker on the Linux server cloud's hosts (the VMs listed under the
+# site's `hosts` in the CR, inventory group selsc_<site>). It needs only the hosts, so run.sh starts it
+# while the Avi controller is still booting. The package is `docker.io` from the Ubuntu repository;
+# set `docker_package` (shared or per-site var) to use another one, e.g. docker-ce once Docker's own apt
+# repository is configured. The install is retried, since the hosts may have just come up and the apt
+# lock or the network may not be ready. NOT TESTED against hosts yet.
+- hosts: "selsc_{{ site }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Install Docker
+      ansible.builtin.apt:
+        name: "{{ docker_package | default('docker.io') }}"
+        state: present
+        update_cache: true
+        lock_timeout: 300
+      register: docker_install
+      retries: 5
+      delay: 10
+      until: docker_install is succeeded
+
+    - name: Docker is enabled and running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Docker answers
+      ansible.builtin.command: docker info
+      changed_when: false

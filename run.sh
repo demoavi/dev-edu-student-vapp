@@ -10,8 +10,12 @@
 # through a temporary 0600 extra-vars file, so the playbooks just use plain names.
 # The site's `hosts` become an inventory (group selsc, with one child group selsc_<site>) for the
 # playbooks that target the hosts: Ansible logs in as ${lsc_ssh_user:-ubuntu} with `lsc_private_key`
-# (written to a temporary 0600 file). A playbook that mentions `selsc` makes run.sh wait for SSH on
-# the site's hosts first.
+# (written to a temporary 0600 file).
+#
+# What to wait for: each playbook says what it needs in a comment line, `# needs: controller`,
+# `# needs: hosts` or `# needs: controller hosts` (no line = controller). run.sh waits for the
+# controller's API and/or SSH on the site's hosts only before the first playbook that needs it, so a
+# playbook that needs only the hosts (docker.yaml) can run while the controller is still booting.
 #   VARS_FILE         default /etc/avi-ansible/vars.json
 #   AVI_PLAYBOOKS     overrides the playbook list of the vars file (space separated, relative to ansible/)
 #   AVI_READY_PATH    API path that answers 200 once a controller is up (default /api/initial-data)
@@ -31,6 +35,13 @@ exec >> "${LOG}" 2>&1
 log() { echo "$(date '+%F %T') avi-playbooks: $*"; }
 
 [ -r "${VARS_FILE}" ] || { log "cannot read ${VARS_FILE}"; exit 1; }
+
+# playbook_needs <playbook>: the words after "# needs:" in the playbook (default: controller)
+playbook_needs() {
+  local needs
+  needs="$(sed -n 's/^# needs: *//p' "${HERE}/ansible/$1" 2>/dev/null | head -1)"
+  echo "${needs:-controller}"
+}
 
 # json_get <python expression on d (the parsed vars file)>
 json_get() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "${VARS_FILE}" "$1"; }
@@ -119,17 +130,22 @@ for site in ${SITES}; do
   site_vars "${site}" "${extra}"
   site_inventory "${site}" "${extra}" "${inventory}" "${key}"
   controller="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("controller",""))' "${extra}")"
-  if [ -z "${controller}" ]; then log "${site}: no controller address (no mgmt-ip on its VM and no controller var)"; failed=$((failed + 1)); cleanup; continue; fi
-  if ! wait_ready "${site}" "${controller}"; then failed=$((failed + 1)); cleanup; continue; fi
-  hosts_ready=0
+  controller_ready_flag=0
+  hosts_ready_flag=0
   for playbook in ${PLAYBOOKS}; do
     marker="${STATE_DIR}/${site}.${playbook//\//_}.done"
     if [ -e "${marker}" ] && [ "${FORCE:-0}" != "1" ]; then log "${site}: ${playbook} already done, skipping"; continue; fi
-    if [ "${hosts_ready}" = "0" ] && grep -q 'selsc' "${HERE}/ansible/${playbook}" 2>/dev/null; then
-      if ! wait_hosts "${site}"; then log "${site}: ${playbook} FAILED (hosts not reachable)"; failed=$((failed + 1)); break; fi
-      hosts_ready=1
+    needs="$(playbook_needs "${playbook}")"
+    if [[ " ${needs} " == *" controller "* ]] && [ "${controller_ready_flag}" = "0" ]; then
+      if [ -z "${controller}" ]; then log "${site}: ${playbook} needs a controller but there is no address (no mgmt-ip on its VM and no controller var)"; failed=$((failed + 1)); break; fi
+      if ! wait_ready "${site}" "${controller}"; then log "${site}: ${playbook} FAILED (controller not ready)"; failed=$((failed + 1)); break; fi
+      controller_ready_flag=1
     fi
-    log "${site}: running ${playbook}"
+    if [[ " ${needs} " == *" hosts "* ]] && [ "${hosts_ready_flag}" = "0" ]; then
+      if ! wait_hosts "${site}"; then log "${site}: ${playbook} FAILED (hosts not reachable)"; failed=$((failed + 1)); break; fi
+      hosts_ready_flag=1
+    fi
+    log "${site}: running ${playbook} (needs: ${needs})"
     if (cd "${HERE}/ansible" && ansible-playbook -i "${inventory}" -e "@${extra}" "${playbook}"); then
       touch "${marker}"; log "${site}: ${playbook} OK"
     else

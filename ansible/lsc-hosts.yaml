@@ -1,10 +1,11 @@
 ---
+# needs: controller hosts
 # Second step, per site: prepare the Linux server cloud's hosts - the VMs listed under the site's
 # `hosts` in the CR, which run.sh turns into the inventory group selsc_<site>. Replaces the old
 # "copy keys / linux_host_install" playbook: the hosts come from the CR instead of a hand-made
 # inventory, and the old copy of the private key onto the hosts is gone (nothing on the hosts uses it;
 # the key stays with the controller's cloud connector user and with run.sh, which logs in with it).
-# Needs the cloud connector user created by base.yaml. NOT TESTED against hosts/controllers yet.
+# Needs the cloud connector user created by base.yaml and Docker on the hosts (docker.yaml). NOT TESTED against hosts/controllers yet.
 - hosts: "selsc_{{ site }}"
   become: true
   gather_facts: false

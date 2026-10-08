@@ -1,4 +1,5 @@
 ---
+# needs: controller
 # First steps for one Avi controller: (1) make sure the admin password is the one we want,
 # (2) create the SSH cloud connector user the Linux Server Cloud will use to reach the Ubuntu hosts.
 # Derived from dev-avi-edu's build/ansible/sa/sa.yaml. Variables come from ../run.sh through an

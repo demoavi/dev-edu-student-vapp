@@ -21,7 +21,7 @@ operator writes it to `/etc/avi-ansible/vars.json` (mode 0600, it holds password
     ansible:
       repo: https://github.com/demoavi/dev-edu-student-vapp.git
       ref: main                    # optional
-      playbooks: [base.yaml, lsc-hosts.yaml]   # optional, relative to ansible/
+      playbooks: [docker.yaml, base.yaml, lsc-hosts.yaml]   # optional, run in this order, relative to ansible/
       shared:                      # given to every site
         avi_username: admin
         avi_password: ...
@@ -48,13 +48,21 @@ the site's `vars` set them:
 | `avi_version` | the first `x.y.z` in the VM's template name (`controller-32.1.3-9105.ova` -> `32.1.3`) |
 | `lsc_hosts` | the site's `hosts`: a list of `{name, address}`; each address is the first address of the netplan interface that carries the default route in that VM's `userData` |
 
+## What each playbook waits for
+
+A playbook declares what it needs in a comment line: `# needs: controller`, `# needs: hosts` or
+`# needs: controller hosts` (no line means `controller`). `run.sh` waits for the controller's API
+and/or for SSH on the site's hosts only before the first playbook that needs it. So `docker.yaml`
+(`needs: hosts`) starts as soon as the hosts answer, while the controller is still booting, then
+`base.yaml` (`needs: controller`) waits for the controller, and `lsc-hosts.yaml` needs both.
+
 ## Inventory for the hosts
 
 `run.sh` turns each site's `hosts` into an inventory: group `selsc`, child group `selsc_<site>`, one
 entry per VM with `ansible_host` set to its derived address. Ansible logs in as `ubuntu`
 (`lsc_ssh_user` to change it) with `lsc_private_key`, which `run.sh` writes to a temporary 0600 file
 whose path goes into the inventory. A playbook that targets the hosts uses `hosts: "selsc_{{ site }}"`;
-when a playbook file mentions `selsc`, `run.sh` first waits for SSH (port 22) on the site's hosts.
+before the first playbook that needs the hosts, `run.sh` waits for SSH (port 22) on the site's hosts.
 
 Other variables used by `base.yaml`: `lsc_private_key` (the task that creates the cloud connector
 user is skipped when it is empty) and the optional `lsc_user_name` (default `credsLsc`). The matching
@@ -76,10 +84,11 @@ next time.
 
 ## Status
 
+- `docker.yaml` installs Docker on the site's hosts (`docker.io` from Ubuntu; `docker_package` to change).
 - `base.yaml` (derived from `dev-avi-edu`'s `sa.yaml`) sets the admin password, then creates the SSH
   cloud connector user (`credsLsc`) the Linux Server Cloud will use to reach the Ubuntu hosts.
 - `lsc-hosts.yaml` runs per site against that site's hosts and runs the controller's
   `linux_host_install` script on each (guarded by a marker file). The private key is not copied to the
   hosts: the controller's cloud connector user holds it, and `run.sh` uses it to log in.
 
-Neither has been run against real controllers/hosts yet.
+None has been run against real controllers/hosts yet.
