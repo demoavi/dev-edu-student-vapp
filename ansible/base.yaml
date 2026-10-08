@@ -1,9 +1,10 @@
 ---
-# First step for one Avi controller: make sure the admin password is the one we want.
-# Derived from dev-avi-edu's build/ansible/sa/sa.yaml (its first task). Variables come from ../run.sh
-# through an extra-vars file built from the CR's `ansible` block: controller and avi_version are
-# derived from the controller VM, the rest (avi_username, avi_password, avi_old_password) are given
-# there. Safe to re-run: if the new password already logs in, nothing is changed.
+# First steps for one Avi controller: (1) make sure the admin password is the one we want,
+# (2) create the SSH cloud connector user the Linux Server Cloud will use to reach the Ubuntu hosts.
+# Derived from dev-avi-edu's build/ansible/sa/sa.yaml. Variables come from ../run.sh through an
+# extra-vars file built from the CR's `ansible` block: controller and avi_version are derived from
+# the controller VM, the rest (avi_username, avi_password, avi_old_password, lsc_private_key) are given
+# there. Safe to re-run: if the new password already logs in it is not changed again.
 # NOT TESTED against a controller yet.
 - hosts: localhost
   gather_facts: false
@@ -43,4 +44,26 @@
         old_password: "{{ avi_old_password }}"
         api_version: "{{ avi_version }}"
       when: login_check.status != 200
+      no_log: true
+
+    - name: Set variable avi_credentials
+      ansible.builtin.set_fact:
+        avi_credentials:
+          api_version: "{{ avi_version }}"
+          controller: "{{ controller }}"
+          username: "{{ avi_username }}"
+          password: "{{ avi_password }}"
+      no_log: true
+
+    # The private key is the one whose public half is in the Ubuntu VMs' sshAuthorizedKeys (CR);
+    # it is passed as text, not as a file path. Skipped when no lsc_private_key is given.
+    - name: Create a Cloud connector user for LSC
+      vmware.alb.avi_cloudconnectoruser:
+        avi_credentials: "{{ avi_credentials }}"
+        name: "{{ lsc_user_name | default('credsLsc') }}"
+        private_key: "{{ lsc_private_key }}"
+      register: lsc_user_output
+      tags:
+        - cloud
+      when: lsc_private_key is defined and lsc_private_key | length > 0
       no_log: true

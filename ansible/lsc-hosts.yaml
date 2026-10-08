@@ -1,0 +1,25 @@
+---
+# Second step, per site: prepare the Linux server cloud's hosts - the VMs listed under the site's
+# `hosts` in the CR, which run.sh turns into the inventory group selsc_<site>. Replaces the old
+# "copy keys / linux_host_install" playbook: the hosts come from the CR instead of a hand-made
+# inventory, and the old copy of the private key onto the hosts is gone (nothing on the hosts uses it;
+# the key stays with the controller's cloud connector user and with run.sh, which logs in with it).
+# Needs the cloud connector user created by base.yaml. NOT TESTED against hosts/controllers yet.
+- hosts: "selsc_{{ site }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    lsc_user: "{{ lsc_user_name | default('credsLsc') }}"
+
+  tasks:
+    # The controller serves an install script for the host; it ran as `curl ... | sudo bash` before.
+    # A marker file keeps a re-run from running it again (it is not known to be idempotent).
+    - name: Run the controller's linux host install script
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -ks "https://{{ controller }}:443/api/linux_host_install?username={{ lsc_user }}" | bash
+        touch /var/lib/avi-linux-host-install.done
+      args:
+        executable: /bin/bash
+        creates: /var/lib/avi-linux-host-install.done

@@ -6,17 +6,23 @@
 #
 # Variables come from /etc/avi-ansible/vars.json, written at first boot from the `ansible` block
 # of the vApp-student-edu CR: for every site the shared variables overlaid by the site's own vars
-# (which already include the derived `controller` and `avi_version`). They reach Ansible through a
-# temporary 0600 extra-vars file, so the playbooks just use plain names (controller, avi_password...).
+# (which already include the derived `controller`, `avi_version` and `lsc_hosts`). They reach Ansible
+# through a temporary 0600 extra-vars file, so the playbooks just use plain names.
+# The site's `hosts` become an inventory (group selsc, with one child group selsc_<site>) for the
+# playbooks that target the hosts: Ansible logs in as ${lsc_ssh_user:-ubuntu} with `lsc_private_key`
+# (written to a temporary 0600 file). A playbook that mentions `selsc` makes run.sh wait for SSH on
+# the site's hosts first.
 #   VARS_FILE         default /etc/avi-ansible/vars.json
 #   AVI_PLAYBOOKS     overrides the playbook list of the vars file (space separated, relative to ansible/)
 #   AVI_READY_PATH    API path that answers 200 once a controller is up (default /api/initial-data)
-#   READY_RETRIES / READY_DELAY   readiness polling (default 90 x 10s)
+#   READY_RETRIES / READY_DELAY   readiness polling for controllers and hosts (default 90 x 10s)
+#   HOST_SSH_PORT     default 22
 #   LOG, STATE_DIR    log file and per-site success markers
 : "${VARS_FILE:=/etc/avi-ansible/vars.json}"
 : "${AVI_READY_PATH:=/api/initial-data}"
 : "${READY_RETRIES:=90}"
 : "${READY_DELAY:=10}"
+: "${HOST_SSH_PORT:=22}"
 : "${LOG:=/var/log/avi-playbooks.log}"
 : "${STATE_DIR:=/var/lib/avi-playbooks}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +47,33 @@ with os.fdopen(fd, "w") as f:
 PY
 }
 
+# site_inventory <site> <extra-vars-file> <inventory-out> <key-out>
+# Writes the Ansible inventory (JSON) for the site's hosts and, if lsc_private_key is set, the key file.
+site_inventory() {
+  python3 - "${VARS_FILE}" "$1" "$2" "$3" "$4" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1])); site = sys.argv[2]
+extra = json.load(open(sys.argv[3])); inventory_path, key_path = sys.argv[4], sys.argv[5]
+common = {"ansible_user": extra.get("lsc_ssh_user", "ubuntu"),
+          "ansible_ssh_common_args": "-o UserKnownHostsFile=/dev/null"}
+if extra.get("lsc_private_key"):
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(extra["lsc_private_key"].rstrip("\n") + "\n")
+    common["ansible_ssh_private_key_file"] = key_path
+hosts = {name: {"ansible_host": address} for name, address in d["sites"][site].get("hosts", {}).items()}
+inventory = {"all": {"children": {"selsc": {"vars": common, "children": {f"selsc_{site}": {"hosts": hosts}}}}}}
+fd = os.open(inventory_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(inventory, f)
+PY
+}
+
+# site_host_addresses <site>: one "name address" line per host
+site_host_addresses() {
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); [print(n, a) for n, a in d["sites"][sys.argv[2]].get("hosts", {}).items()]' "${VARS_FILE}" "$1"
+}
+
 controller_ready() {
   [ "$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 8 "https://${1}${AVI_READY_PATH}" 2>/dev/null)" = "200" ]
 }
@@ -56,27 +89,54 @@ wait_ready() {
   log "${site}: ${controller} ready"
 }
 
+host_ssh_ready() { timeout 5 bash -c "exec 3<>/dev/tcp/${1}/${HOST_SSH_PORT}" 2>/dev/null; }
+
+# wait_hosts <site>: SSH port of every host of the site answers
+wait_hosts() {
+  local site=$1 name address n
+  while read -r name address; do
+    [ -n "${name}" ] || continue
+    n=1
+    until host_ssh_ready "${address}"; do
+      if [ "${n}" -ge "${READY_RETRIES}" ]; then log "${site}: host ${name} (${address}) not reachable on port ${HOST_SSH_PORT} after ${READY_RETRIES} checks"; return 1; fi
+      log "${site}: host ${name} (${address}) not reachable yet (check ${n}/${READY_RETRIES})"
+      n=$((n + 1))
+      sleep "${READY_DELAY}"
+    done
+    log "${site}: host ${name} (${address}) reachable"
+  done < <(site_host_addresses "${site}")
+}
+
 SITES="$(json_get '" ".join(d["sites"])')" || { log "bad vars file ${VARS_FILE}"; exit 1; }
 PLAYBOOKS="${AVI_PLAYBOOKS:-$(json_get '" ".join(d.get("playbooks") or ["base.yaml"])')}"
 failed=0
 log "started: sites=[${SITES}] playbooks=[${PLAYBOOKS}]"
 for site in ${SITES}; do
   extra="$(mktemp "${STATE_DIR}/vars.XXXXXX")"
+  inventory="$(mktemp "${STATE_DIR}/inventory.XXXXXX")"
+  key="$(mktemp "${STATE_DIR}/key.XXXXXX")"
+  cleanup() { rm -f "${extra}" "${inventory}" "${key}"; }
   site_vars "${site}" "${extra}"
+  site_inventory "${site}" "${extra}" "${inventory}" "${key}"
   controller="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("controller",""))' "${extra}")"
-  if [ -z "${controller}" ]; then log "${site}: no controller address (no mgmt-ip on its VM and no controller var)"; failed=$((failed + 1)); rm -f "${extra}"; continue; fi
-  if ! wait_ready "${site}" "${controller}"; then failed=$((failed + 1)); rm -f "${extra}"; continue; fi
+  if [ -z "${controller}" ]; then log "${site}: no controller address (no mgmt-ip on its VM and no controller var)"; failed=$((failed + 1)); cleanup; continue; fi
+  if ! wait_ready "${site}" "${controller}"; then failed=$((failed + 1)); cleanup; continue; fi
+  hosts_ready=0
   for playbook in ${PLAYBOOKS}; do
     marker="${STATE_DIR}/${site}.${playbook//\//_}.done"
     if [ -e "${marker}" ] && [ "${FORCE:-0}" != "1" ]; then log "${site}: ${playbook} already done, skipping"; continue; fi
+    if [ "${hosts_ready}" = "0" ] && grep -q 'selsc' "${HERE}/ansible/${playbook}" 2>/dev/null; then
+      if ! wait_hosts "${site}"; then log "${site}: ${playbook} FAILED (hosts not reachable)"; failed=$((failed + 1)); break; fi
+      hosts_ready=1
+    fi
     log "${site}: running ${playbook}"
-    if (cd "${HERE}/ansible" && ansible-playbook -e "@${extra}" "${playbook}"); then
+    if (cd "${HERE}/ansible" && ansible-playbook -i "${inventory}" -e "@${extra}" "${playbook}"); then
       touch "${marker}"; log "${site}: ${playbook} OK"
     else
       log "${site}: ${playbook} FAILED"; failed=$((failed + 1)); break
     fi
   done
-  rm -f "${extra}"
+  cleanup
 done
 log "finished, ${failed} failure(s)"
 [ "${failed}" -eq 0 ]
