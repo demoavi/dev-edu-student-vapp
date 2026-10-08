@@ -1,30 +1,26 @@
 ---
 # First step for one Avi controller: make sure the admin password is the one we want.
-# Derived from dev-avi-edu's build/ansible/sa/sa.yaml (its first task), with every value taken
-# from the environment instead of being hardcoded. Safe to re-run: if the new password already
-# logs in, nothing is changed. Run by ../run.sh once per controller (AVI_CONTROLLER).
+# Derived from dev-avi-edu's build/ansible/sa/sa.yaml (its first task). Variables come from ../run.sh
+# through an extra-vars file built from the CR's `ansible` block: controller and avi_version are
+# derived from the controller VM, the rest (avi_username, avi_password, avi_old_password) are given
+# there. Safe to re-run: if the new password already logs in, nothing is changed.
 # NOT TESTED against a controller yet.
 - hosts: localhost
   gather_facts: false
   collections:
     - vmware.alb
 
-  vars:
-    controller: "{{ lookup('env', 'AVI_CONTROLLER') }}"
-    avi_version: "{{ lookup('env', 'AVI_VERSION') }}"
-    avi_username: "{{ lookup('env', 'AVI_USERNAME') | default('admin', true) }}"
-    avi_password: "{{ lookup('env', 'AVI_PASSWORD') }}"
-    avi_old_password: "{{ lookup('env', 'AVI_OLD_PASSWORD') }}"
-
   tasks:
-    - name: All required environment variables are set
+    - name: All required variables are set (and none is still a <placeholder>)
       ansible.builtin.assert:
         that:
-          - controller | length > 0
-          - avi_version | length > 0
-          - avi_password | length > 0
-          - avi_old_password | length > 0
-        fail_msg: "AVI_CONTROLLER, AVI_VERSION, AVI_PASSWORD and AVI_OLD_PASSWORD must be set"
+          - controller is defined and controller | length > 0
+          - avi_version is defined and avi_version | length > 0
+          - avi_username is defined and avi_username | length > 0
+          - avi_password is defined and avi_password | length > 0 and avi_password is not match('^<.*>$')
+          - avi_old_password is defined and avi_old_password | length > 0
+        fail_msg: "controller, avi_version, avi_username, avi_password and avi_old_password must be set for site {{ site | default('?') }}"
+      no_log: true
 
     - name: Check whether the new admin password already works
       ansible.builtin.uri:
