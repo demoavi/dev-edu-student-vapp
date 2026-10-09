@@ -14,13 +14,23 @@
     lsc_user: "{{ lsc_user_name | default('credsLsc') }}"
 
   tasks:
-    # The controller serves an install script for the host; it ran as `curl ... | sudo bash` before.
-    # A marker file keeps a re-run from running it again (it is not known to be idempotent).
+    # The controller serves an install script for the host (documented as
+    # `curl -ks https://<controller>/api/linux_host_install?username=<user> | sudo bash`). It embeds the
+    # connector user's public key, so base.yaml must have stored one. Strict on purpose: an HTTP error (-f)
+    # or an answer that is not a script stops the task and writes no marker - before, an error page was
+    # piped to bash and the marker was written anyway. The marker file keeps a re-run from running the
+    # script again (it is not known to be idempotent); it is a new name on purpose, so the markers left by
+    # the earlier, unchecked version of this task don't count.
     - name: Run the controller's linux host install script
       ansible.builtin.shell: |
-        set -o pipefail
-        curl -ks "https://{{ controller }}:443/api/linux_host_install?username={{ lsc_user }}" | bash
-        touch /var/lib/avi-linux-host-install.done
+        set -eo pipefail
+        script="$(curl -ksSf "https://{{ controller }}:443/api/linux_host_install?username={{ lsc_user }}")"
+        case "${script}" in
+          "#!"*) ;;
+          *) echo "linux_host_install did not return a script: ${script:0:200}" >&2; exit 1 ;;
+        esac
+        printf '%s\n' "${script}" | bash
+        touch /var/lib/avi-linux-host-install.ok
       args:
         executable: /bin/bash
-        creates: /var/lib/avi-linux-host-install.done
+        creates: /var/lib/avi-linux-host-install.ok

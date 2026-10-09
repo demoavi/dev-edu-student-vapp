@@ -78,7 +78,9 @@ keep their JSON types, so lists and dictionaries are fine.
 
 Other knobs (environment): `AVI_PLAYBOOKS` (override the list), `AVI_READY_PATH` (API path that
 answers 200 once a controller is up, default `/api/initial-data`), `READY_RETRIES`/`READY_DELAY`
-(default 90 x 10 s), `FORCE=1` (re-run what already succeeded), `VARS_FILE`, `LOG`, `STATE_DIR`.
+(controllers, default 90 x 10 s), `HOST_READY_RETRIES`/`HOST_READY_DELAY` (SSH on the site's hosts,
+default 360 x 15 s, about 90 min - the operator builds a disk-sized template on first use, which
+delays the hosts), `FORCE=1` (re-run what already succeeded), `VARS_FILE`, `LOG`, `STATE_DIR`.
 A playbook that succeeded for a site leaves a marker in `/var/lib/avi-playbooks/` and is skipped
 next time.
 
@@ -88,7 +90,8 @@ next time.
 - `base.yaml` (derived from `dev-avi-edu`'s `sa.yaml`) sets the admin password, then creates the SSH
   cloud connector user (`credsLsc`) the Linux Server Cloud will use to reach the Ubuntu hosts.
 - `lsc-hosts.yaml` runs per site against that site's hosts and runs the controller's
-  `linux_host_install` script on each (guarded by a marker file). The private key is not copied to the
+  `linux_host_install` script on each. The task is strict: an HTTP error or an answer that is not a
+  script fails it and writes no marker (the marker `/var/lib/avi-linux-host-install.ok` guards a re-run). The private key is not copied to the
   hosts: the controller's cloud connector user holds it, and `run.sh` uses it to log in.
 
 None has been run against real controllers/hosts yet.

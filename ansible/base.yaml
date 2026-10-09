@@ -56,8 +56,9 @@
           password: "{{ avi_password }}"
       no_log: true
 
-    # The private key is the one whose public half is in the Ubuntu VMs' sshAuthorizedKeys (CR);
-    # it is passed as text, not as a file path. Skipped when no lsc_private_key is given.
+    # The private key is the one whose public half is in the Ubuntu VMs' sshAuthorizedKeys (CR); it is
+    # passed as text, not as a file path (the controller derives and stores the public half itself).
+    # Skipped when no lsc_private_key is given.
     - name: Create a Cloud connector user for LSC
       vmware.alb.avi_cloudconnectoruser:
         avi_credentials: "{{ avi_credentials }}"

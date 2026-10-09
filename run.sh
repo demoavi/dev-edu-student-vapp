@@ -19,13 +19,19 @@
 #   VARS_FILE         default /etc/avi-ansible/vars.json
 #   AVI_PLAYBOOKS     overrides the playbook list of the vars file (space separated, relative to ansible/)
 #   AVI_READY_PATH    API path that answers 200 once a controller is up (default /api/initial-data)
-#   READY_RETRIES / READY_DELAY   readiness polling for controllers and hosts (default 90 x 10s)
+#   READY_RETRIES / READY_DELAY   readiness polling for controllers (default 90 x 10s)
+#   HOST_READY_RETRIES / HOST_READY_DELAY   same for the SSH port of the site's hosts (default
+#                     360 x 15s, ~90 min): the operator creates the hosts after building their
+#                     disk-sized template on first use (a ~600 MB upload, ~30 min and more on a slow
+#                     link), so they can appear long after this VM booted
 #   HOST_SSH_PORT     default 22
 #   LOG, STATE_DIR    log file and per-site success markers
 : "${VARS_FILE:=/etc/avi-ansible/vars.json}"
 : "${AVI_READY_PATH:=/api/initial-data}"
 : "${READY_RETRIES:=90}"
 : "${READY_DELAY:=10}"
+: "${HOST_READY_RETRIES:=360}"
+: "${HOST_READY_DELAY:=15}"
 : "${HOST_SSH_PORT:=22}"
 : "${LOG:=/var/log/avi-playbooks.log}"
 : "${STATE_DIR:=/var/lib/avi-playbooks}"
@@ -126,13 +132,17 @@ wait_hosts() {
   while read -r name address; do
     [ -n "${name}" ] || continue
     n=1
+    start=${SECONDS}
     until host_ssh_ready "${address}"; do
-      if [ "${n}" -ge "${READY_RETRIES}" ]; then log "${site}: host ${name} (${address}) not reachable on port ${HOST_SSH_PORT} after ${READY_RETRIES} checks"; return 1; fi
-      log "${site}: host ${name} (${address}) not reachable yet (check ${n}/${READY_RETRIES})"
+      if [ "${n}" -ge "${HOST_READY_RETRIES}" ]; then log "${site}: host ${name} (${address}) not reachable on port ${HOST_SSH_PORT} after ${HOST_READY_RETRIES} checks ($(( (SECONDS - start) / 60 )) min)"; return 1; fi
+      # first check, then every 10th: a wait can last an hour and more
+      if [ "${n}" -eq 1 ] || [ $((n % 10)) -eq 0 ]; then
+        log "${site}: host ${name} (${address}) not reachable yet (check ${n}/${HOST_READY_RETRIES}, $(( (SECONDS - start) / 60 )) min so far)"
+      fi
       n=$((n + 1))
-      sleep "${READY_DELAY}"
+      sleep "${HOST_READY_DELAY}"
     done
-    log "${site}: host ${name} (${address}) reachable"
+    log "${site}: host ${name} (${address}) reachable after $(( (SECONDS - start) / 60 )) min"
   done < <(site_host_addresses "${site}")
 }
 
