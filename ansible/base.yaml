@@ -1,11 +1,16 @@
 ---
 # needs: controller
 # First steps for one Avi controller: (1) make sure the admin password is the one we want,
-# (2) create the SSH cloud connector user the Linux Server Cloud will use to reach the Ubuntu hosts.
+# (2) system configuration: DNS and NTP servers, welcome workflow done, license tier,
+# (3) create the SSH cloud connector user the Linux Server Cloud will use to reach the Ubuntu hosts.
 # Derived from dev-avi-edu's build/ansible/sa/sa.yaml. Variables come from ../run.sh through an
 # extra-vars file built from the CR's `ansible` block: controller and avi_version are derived from
 # the controller VM, the rest (avi_username, avi_password, avi_old_password, lsc_private_key) are given
 # there. Safe to re-run: if the new password already logs in it is not changed again.
+# Optional variables: dns_servers / ntp_servers (lists of IPv4 addresses; default: the controller's own
+# default gateway, `controller_gateway`, derived from its default-gw OVF property - the lab router
+# answers both), dns_search_domain (default none), license_tier (default: ENTERPRISE unless both
+# jwt_token and account_id are given - then the controller's own default, with Cloud Services, stays).
 # NOT TESTED against a controller yet.
 - hosts: localhost
   gather_facts: false
@@ -54,6 +59,59 @@
           controller: "{{ controller }}"
           username: "{{ avi_username }}"
           password: "{{ avi_password }}"
+      no_log: true
+
+    # System configuration. The input variables (dns_servers, ntp_servers) and the lists built here have
+    # different names on purpose: variables from the extra-vars file cannot be overridden by set_fact.
+    - name: Define the DNS server list
+      ansible.builtin.set_fact:
+        avi_dns_server_list: "{{ avi_dns_server_list | default([]) + [{'type': 'V4', 'addr': item}] }}"
+      loop: "{{ dns_servers | default([controller_gateway | default('')], true) | reject('equalto', '') | list }}"
+
+    - name: Define the NTP server list
+      ansible.builtin.set_fact:
+        avi_ntp_server_list: "{{ avi_ntp_server_list | default([]) + [{'server': {'type': 'V4', 'addr': item}}] }}"
+      loop: "{{ ntp_servers | default([controller_gateway | default('')], true) | reject('equalto', '') | list }}"
+
+    # License tier. The controller's default tier (ENTERPRISE_WITH_CLOUD_SERVICES) only works once it is
+    # registered with Cloud Services, which takes both a jwt_token and an account_id. Without both
+    # (missing, empty or still a <placeholder>) the tier is set to ENTERPRISE; with both it is left alone.
+    # An explicit license_tier always wins.
+    - name: Work out the license tier to set
+      ansible.builtin.set_fact:
+        avi_license_tier: >-
+          {{ license_tier
+             if license_tier is defined and license_tier | length > 0
+             else ('' if (jwt_token | default('')) | length > 0 and (jwt_token | default('')) is not match('^<.*>$')
+                         and (account_id | default('')) | length > 0 and (account_id | default('')) is not match('^<.*>$')
+                   else 'ENTERPRISE') }}
+
+    - name: The license tier is one the controller knows
+      ansible.builtin.assert:
+        that:
+          - avi_license_tier in ['ENTERPRISE_WITH_CLOUD_SERVICES', 'ENTERPRISE', 'ENTERPRISE_18', 'ENTERPRISE_16', 'ESSENTIALS', 'BASIC']
+        fail_msg: "license tier '{{ avi_license_tier }}' is not a default_license_tier value"
+      when: avi_license_tier | length > 0
+
+    # One PATCH of just these fields, not avi_systemconfiguration: that module PUTs the whole object by
+    # default, which would reset every setting not listed here. avi_api_session compares before/after, so
+    # `changed` is only reported when something really changed. Only what is known is sent: no DNS/NTP
+    # servers -> that part is left alone.
+    - name: Define the system configuration changes
+      ansible.builtin.set_fact:
+        avi_systemconfiguration_changes: >-
+          {{ {'welcome_workflow_complete': true}
+             | combine({'dns_configuration': {'search_domain': dns_search_domain | default(''), 'server_list': avi_dns_server_list}} if avi_dns_server_list is defined else {})
+             | combine({'ntp_configuration': {'ntp_servers': avi_ntp_server_list}} if avi_ntp_server_list is defined else {})
+             | combine({'default_license_tier': avi_license_tier} if avi_license_tier | length > 0 else {}) }}
+
+    - name: Apply the system configuration (DNS, NTP, welcome workflow, license tier)
+      vmware.alb.avi_api_session:
+        avi_credentials: "{{ avi_credentials }}"
+        http_method: patch
+        path: systemconfiguration
+        data:
+          replace: "{{ avi_systemconfiguration_changes }}"
       no_log: true
 
     # The private key is the one whose public half is in the Ubuntu VMs' sshAuthorizedKeys (CR); it is

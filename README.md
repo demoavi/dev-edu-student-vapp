@@ -68,6 +68,16 @@ Other variables used by `base.yaml`: `lsc_private_key` (the task that creates th
 user is skipped when it is empty) and the optional `lsc_user_name` (default `credsLsc`). The matching
 public key is put on the Ubuntu VMs through the CR's per-VM `sshAuthorizedKeys`.
 
+`base.yaml` also sets the controller's system configuration with one PATCH of just the fields it
+knows (not a PUT of the whole object): `dns_servers` and `ntp_servers` (lists of IPv4 addresses;
+default: the controller's own default gateway, `controller_gateway`, which the operator derives from
+the controller VM's `default-gw` OVF property), `dns_search_domain` (default none) and `license_tier`
+(one of `ENTERPRISE_WITH_CLOUD_SERVICES`, `ENTERPRISE`, `ENTERPRISE_18`, `ENTERPRISE_16`,
+`ESSENTIALS`, `BASIC`). Without an explicit `license_tier`, the default tier is set to `ENTERPRISE`
+unless both `jwt_token` and `account_id` are given (missing, empty or `<placeholder>` counts as not
+given): then it is left alone, i.e. the controller's own default with Cloud Services. It also marks the welcome workflow complete. Put
+overrides in the site's `vars` (or `shared`) in the CR.
+
 Playbooks use plain names (`controller`, `avi_version`, `avi_username`, `avi_password`, ...). Values
 keep their JSON types, so lists and dictionaries are fine.
 
@@ -87,7 +97,8 @@ next time.
 ## Status
 
 - `docker.yaml` installs Docker on the site's hosts (`docker.io` from Ubuntu; `docker_package` to change).
-- `base.yaml` (derived from `dev-avi-edu`'s `sa.yaml`) sets the admin password, then creates the SSH
+- `base.yaml` (derived from `dev-avi-edu`'s `sa.yaml`) sets the admin password, the system
+  configuration (DNS/NTP servers, welcome workflow, optional license tier), then creates the SSH
   cloud connector user (`credsLsc`) the Linux Server Cloud will use to reach the Ubuntu hosts.
 - `lsc-hosts.yaml` runs per site against that site's hosts and runs the controller's
   `linux_host_install` script on each. The task is strict: an HTTP error or an answer that is not a
