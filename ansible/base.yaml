@@ -2,7 +2,8 @@
 # needs: controller
 # First steps for one Avi controller: (1) make sure the admin password is the one we want,
 # (2) system configuration: DNS and NTP servers, welcome workflow done, license tier,
-# (3) create the SSH cloud connector user the Linux Server Cloud will use to reach the Ubuntu hosts.
+# (3) create the SSH cloud connector user the Linux Server Cloud will use to reach the Ubuntu hosts,
+# (4) set the configuration backup passphrase (the admin password).
 # Derived from dev-avi-edu's build/ansible/sa/sa.yaml. Variables come from ../run.sh through an
 # extra-vars file built from the CR's `ansible` block: controller and avi_version are derived from
 # the controller VM, the rest (avi_username, avi_password, avi_old_password, lsc_private_key) are given
@@ -127,3 +128,16 @@
         - cloud
       when: lsc_private_key is defined and lsc_private_key | length > 0
       no_log: true
+
+    # Configuration backups need a passphrase before the controller will encrypt/export them; the admin
+    # password is used. The controller ships a default "Backup-Configuration" object, which this updates
+    # (save_local keeps the backups on the controller itself).
+    - name: Create Backup Configuration passphrase
+      vmware.alb.avi_backupconfiguration:
+        avi_credentials: "{{ avi_credentials }}"
+        state: present
+        backup_passphrase: "{{ avi_credentials.password }}"
+        name: Backup-Configuration
+        save_local: true
+      no_log: true
+

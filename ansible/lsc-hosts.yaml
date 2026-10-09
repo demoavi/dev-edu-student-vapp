@@ -6,6 +6,12 @@
 # inventory, and the old copy of the private key onto the hosts is gone (nothing on the hosts uses it;
 # the key stays with the controller's cloud connector user and with run.sh, which logs in with it).
 # Needs the cloud connector user created by base.yaml and Docker on the hosts (docker.yaml). NOT TESTED against hosts/controllers yet.
+# The file has two plays: (1) the hosts run the controller's install script, (2) the controller gets
+# the Linux server cloud built from those same hosts (the site's `lsc_hosts`: name and address of each
+# host listed under the site in the CR, so the right hosts always end up with the right controller).
+# Variables for the cloud (all optional, set them in the CR's ansible.shared or the site's vars):
+# cloud_name (Default-Cloud), se_cpu (1) and se_memory_gb (2) per host, se_sys_disk_gb (10),
+# se_log_disk_gb (5), lsc_user_name (credsLsc).
 - hosts: "selsc_{{ site }}"
   become: true
   gather_facts: false
@@ -34,3 +40,59 @@
       args:
         executable: /bin/bash
         creates: /var/lib/avi-linux-host-install.ok
+
+# Play 2 - the cloud, on the controller's API. The playbook runs as a whole per site, so a failure
+# here re-runs the install task above on the next run.sh run, which is safe (its marker file skips it).
+# To re-apply changed cloud variables after the playbook succeeded, run run.sh with FORCE=1.
+- hosts: localhost
+  gather_facts: false
+  collections:
+    - vmware.alb
+
+  vars:
+    lsc_user: "{{ lsc_user_name | default('credsLsc') }}"
+    avi_credentials:
+      api_version: "{{ avi_version }}"
+      controller: "{{ controller }}"
+      username: "{{ avi_username }}"
+      password: "{{ avi_password }}"
+
+  tasks:
+    - name: The site has hosts to build the cloud from
+      ansible.builtin.assert:
+        that:
+          - lsc_hosts is defined and lsc_hosts | length > 0
+          - avi_version is defined and avi_version | length > 0
+        fail_msg: "no lsc_hosts (hosts listed under the site in the CR) for site {{ site | default('?') }}"
+
+    # One entry per host. The attribute values keep the types of the known-good example: CPU is a
+    # string, MEMORY (GB) an integer, the two flags booleans. The list is built under a name that is
+    # not an input variable: extra-vars cannot be overridden by set_fact.
+    - name: Define the SE host list
+      ansible.builtin.set_fact:
+        avi_lsc_se_hosts: >-
+          {{ avi_lsc_se_hosts | default([]) + [{
+               'host_attr': [
+                 {'attr_key': 'CPU', 'attr_val': (se_cpu | default(1)) | string},
+                 {'attr_key': 'MEMORY', 'attr_val': (se_memory_gb | default(2)) | int},
+                 {'attr_key': 'DPDK', 'attr_val': false},
+                 {'attr_key': 'SE_INBAND_MGMT', 'attr_val': false}],
+               'host_ip': {'type': 'V4', 'addr': item.address}}] }}
+      loop: "{{ lsc_hosts }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.address }})"
+
+    - name: Create the Linux server cloud
+      vmware.alb.avi_cloud:
+        avi_credentials: "{{ avi_credentials }}"
+        name: "{{ cloud_name | default('Default-Cloud') }}"
+        vtype: CLOUD_LINUXSERVER
+        dhcp_enabled: false
+        prefer_static_routes: false
+        linuxserver_configuration:
+          se_sys_disk_size_GB: "{{ se_sys_disk_gb | default(10) | int }}"
+          se_log_disk_size_GB: "{{ se_log_disk_gb | default(5) | int }}"
+          se_inband_mgmt: false
+          hosts: "{{ avi_lsc_se_hosts }}"
+          ssh_user_ref: "/api/cloudconnectoruser/?name={{ lsc_user }}"
+      no_log: true

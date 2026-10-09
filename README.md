@@ -98,8 +98,14 @@ next time.
 
 - `docker.yaml` installs Docker on the site's hosts (`docker.io` from Ubuntu; `docker_package` to change).
 - `base.yaml` (derived from `dev-avi-edu`'s `sa.yaml`) sets the admin password, the system
-  configuration (DNS/NTP servers, welcome workflow, optional license tier), then creates the SSH
-  cloud connector user (`credsLsc`) the Linux Server Cloud will use to reach the Ubuntu hosts.
+  configuration (DNS/NTP servers, welcome workflow, license tier), creates the SSH cloud connector
+  user (`credsLsc`) the Linux Server Cloud will use to reach the Ubuntu hosts, and sets the
+  configuration backup passphrase (the admin password).
+- `lsc-hosts.yaml` has a second play that creates the Linux server cloud on the controller from the
+  site's hosts (`lsc_hosts`: name and address of each host listed under the site in the CR). Optional
+  variables: `cloud_name` (`Default-Cloud`), `se_cpu` (1) and `se_memory_gb` (2) per host,
+  `se_sys_disk_gb` (10), `se_log_disk_gb` (5), `lsc_user_name` (`credsLsc`). The playbook's success
+  marker means changed cloud variables are only re-applied with `FORCE=1`.
 - `lsc-hosts.yaml` runs per site against that site's hosts and runs the controller's
   `linux_host_install` script on each. The task is strict: an HTTP error or an answer that is not a
   script fails it and writes no marker (the marker `/var/lib/avi-linux-host-install.ok` guards a re-run). The private key is not copied to the
