@@ -3,7 +3,9 @@
 # First steps for one Avi controller: (1) make sure the admin password is the one we want,
 # (2) system configuration: DNS and NTP servers, welcome workflow done, license tier,
 # (3) create the SSH cloud connector user the Linux Server Cloud will use to reach the Ubuntu hosts,
-# (4) set the configuration backup passphrase (the admin password).
+# (4) set the configuration backup passphrase (the admin password), (5) set the controller's API idle
+# timeout to 240 (controller_api_idle_timeout to change it), (6) turn off the controller's SSL profile
+# and license fault alerts (inventory fault config).
 # Derived from dev-avi-edu's build/ansible/sa/sa.yaml. Variables come from ../run.sh through an
 # extra-vars file built from the CR's `ansible` block: controller and avi_version are derived from
 # the controller VM, the rest (avi_username, avi_password, avi_old_password, lsc_private_key) are given
@@ -141,3 +143,17 @@
         save_local: true
       no_log: true
 
+
+    - name: Set the API idle timeout (controller properties)
+      vmware.alb.avi_controllerproperties:
+        avi_credentials: "{{ avi_credentials }}"
+        api_idle_timeout: "{{ controller_api_idle_timeout | default(240) | int }}"
+      no_log: true
+
+    - name: Turn off the SSL profile and license faults (inventory fault config)
+      vmware.alb.avi_inventoryfaultconfig:
+        avi_credentials: "{{ avi_credentials }}"
+        controller_faults:
+          sslprofile_faults: false
+          license_faults: false
+      no_log: true
