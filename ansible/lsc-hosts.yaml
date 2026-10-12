@@ -136,3 +136,84 @@
           hosts: "{{ avi_lsc_se_hosts }}"
           ssh_user_ref: "/api/cloudconnectoruser/?name={{ lsc_user }}"
       no_log: true
+
+    # Virtual services on the cloud's service engine groups. Addresses and groups come from the site's vars
+    # in the CR: dns_vip + dns_seg (the DNS virtual service) and web_vip + web_seg (the HTTP/HTTPS one).
+    # The groups are the ones created above from the hosts' `seg`, so use the same names there.
+    - name: The site defines the virtual service addresses and groups
+      ansible.builtin.assert:
+        that:
+          - dns_vip is defined and dns_vip | length > 0
+          - dns_seg is defined and dns_seg | length > 0
+          - web_vip is defined and web_vip | length > 0
+          - web_seg is defined and web_seg | length > 0
+        fail_msg: "site {{ site | default('?') }}: set dns_vip, dns_seg, web_vip and web_seg in the site's vars in the CR"
+
+    - name: Create vsvip for dns VS - LSC
+      vmware.alb.avi_vsvip:
+        avi_credentials: "{{ avi_credentials | default(omit) }}"
+        api_context: "{{ avi_api_context | default(omit) }}"
+        name: "vsvip-dns"
+        vip:
+          - auto_allocate_floating_ip: false
+            auto_allocate_ip: false
+            ip_address:
+              type: "V4"
+              addr: "{{ dns_vip }}"
+            vip_id: 1
+            prefix_length: 32
+
+    - name: Create vsvip for web app
+      vmware.alb.avi_vsvip:
+        avi_credentials: "{{ avi_credentials | default(omit) }}"
+        api_context: "{{ avi_api_context | default(omit) }}"
+        name: "vsvip-web-app"
+        vip:
+          - auto_allocate_floating_ip: false
+            auto_allocate_ip: false
+            ip_address:
+              type: "V4"
+              addr: "{{ web_vip }}"
+            vip_id: 1
+            prefix_length: 32
+
+    - name: Create DNS Virtualservice
+      vmware.alb.avi_virtualservice:
+        avi_credentials: "{{ avi_credentials | default(omit) }}"
+        api_context: "{{ avi_api_context | default(omit) }}"
+        name: "dns"
+        application_profile_ref: "/api/applicationprofile/?name=System-DNS"
+        network_profile_ref: "/api/networkprofile/?name=System-UDP-Per-Pkt"
+        se_group_ref: "/api/serviceenginegroup/?name={{ dns_seg }}"
+        services:
+          - port: 53
+        vsvip_ref: "/api/vsvip/?name=vsvip-dns"
+
+    - name: Create HTTP Virtualservice
+      vmware.alb.avi_virtualservice:
+        avi_credentials: "{{ avi_credentials | default(omit) }}"
+        api_context: "{{ avi_api_context | default(omit) }}"
+        name: "web-app"
+        application_profile_ref: "/api/applicationprofile/?name=System-Secure-HTTP"
+        ssl_profile_ref: "/api/sslprofile/?name=System-Standard"
+        ssl_key_and_certificate_refs:
+          - "/api/sslkeyandcertificate/?name=System-Default-Cert"
+        services:
+          - port: 80
+            enable_ssl: false
+          - port: 443
+            enable_ssl: true
+        vsvip_ref: "/api/vsvip/?name=vsvip-web-app"
+        se_group_ref: "/api/serviceenginegroup/?name={{ web_seg }}"
+        analytics_policy:
+          udf_log_throttle: 10
+          metrics_realtime_update:
+            duration: 0
+            enabled: true
+          significant_log_throttle: 0
+          client_insights: NO_INSIGHTS
+          full_client_logs:
+            duration: 30
+            throttle: 10
+            enabled: true
+          all_headers: true
