@@ -13,7 +13,7 @@
 # cloud_name (Default-Cloud), se_cpu (1) and se_memory_gb (2) per host, se_sys_disk_gb (10),
 # se_log_disk_gb (5), lsc_user_name (credsLsc). A host with a `seg` in the CR (lsc_hosts[].seg) is put in
 # that service engine group, created here; hosts without one stay in Default-Group.
-# Order: cloud without hosts, then the groups, then the cloud again with the hosts.
+# Order: DNS profile, cloud without hosts, then the groups, then the cloud again with the hosts.
 - hosts: "selsc_{{ site }}"
   become: true
   gather_facts: false
@@ -55,6 +55,7 @@
   vars:
     lsc_user: "{{ lsc_user_name | default('credsLsc') }}"
     avi_cloud_name: "{{ cloud_name | default('Default-Cloud') }}"
+    avi_dns_vs_name: dns
     avi_credentials:
       api_version: "{{ avi_version }}"
       controller: "{{ controller }}"
@@ -67,11 +68,26 @@
         that:
           - lsc_hosts is defined and lsc_hosts | length > 0
           - avi_version is defined and avi_version | length > 0
-        fail_msg: "no lsc_hosts (hosts listed under the site in the CR) for site {{ site | default('?') }}"
+          - dns_domain is defined and dns_domain | length > 0
+        fail_msg: "no lsc_hosts (hosts listed under the site in the CR) or no dns_domain (the site's DNS service domain, e.g. dc1.avi.net) for site {{ site | default('?') }}"
 
+    # The DNS profile (dns_domain from the site's vars in the CR) comes first: the cloud refers to it.
     # A service engine group belongs to a cloud, so the order matters: (1) the cloud is created without
     # hosts, (2) the groups listed in the CR are created, (3) the cloud is updated with its hosts, which
     # now can refer to their group.
+    - name: Create Avi DNS provider without domain names - LSC
+      vmware.alb.avi_ipamdnsproviderprofile:
+        avi_credentials: "{{ avi_credentials | default(omit) }}"
+        api_context: "{{ avi_api_context | default(omit) }}"
+        name: "{{ dns_profile_name | default('dns-avi-lsc') }}"
+        type: IPAMDNS_TYPE_INTERNAL_DNS
+        internal_profile:
+          dns_service_domain:
+            - domain_name: "{{ dns_domain }}"
+              pass_through: true
+              record_ttl: 100
+          ttl: 300
+
     - name: Create the Linux server cloud
       vmware.alb.avi_cloud:
         avi_credentials: "{{ avi_credentials }}"
@@ -79,6 +95,7 @@
         vtype: CLOUD_LINUXSERVER
         dhcp_enabled: false
         prefer_static_routes: false
+        dns_provider_ref: "/api/ipamdnsproviderprofile/?name={{ dns_profile_name | default('dns-avi-lsc') }}"
         linuxserver_configuration:
           se_sys_disk_size_GB: "{{ se_sys_disk_gb | default(10) | int }}"
           se_log_disk_size_GB: "{{ se_log_disk_gb | default(5) | int }}"
@@ -129,6 +146,7 @@
         vtype: CLOUD_LINUXSERVER
         dhcp_enabled: false
         prefer_static_routes: false
+        dns_provider_ref: "/api/ipamdnsproviderprofile/?name={{ dns_profile_name | default('dns-avi-lsc') }}"
         linuxserver_configuration:
           se_sys_disk_size_GB: "{{ se_sys_disk_gb | default(10) | int }}"
           se_log_disk_size_GB: "{{ se_log_disk_gb | default(5) | int }}"
@@ -138,7 +156,7 @@
       no_log: true
 
     # Virtual services on the cloud's service engine groups. Addresses and groups come from the site's vars
-    # in the CR: dns_vip + dns_seg (the DNS virtual service) and web_vip + web_seg (the HTTP/HTTPS one).
+    # in the CR: dns_vip + dns_seg (the DNS virtual service) and web_vip + web_seg (the HTTP/HTTPS one);
     # The groups are the ones created above from the hosts' `seg`, so use the same names there.
     - name: The site defines the virtual service addresses and groups
       ansible.builtin.assert:
@@ -176,18 +194,31 @@
               addr: "{{ web_vip }}"
             vip_id: 1
             prefix_length: 32
+        dns_info:
+          - fqdn: "{{ 'webapp.' + dns_domain }}"
+            type: "DNS_RECORD_A"
 
     - name: Create DNS Virtualservice
       vmware.alb.avi_virtualservice:
         avi_credentials: "{{ avi_credentials | default(omit) }}"
         api_context: "{{ avi_api_context | default(omit) }}"
-        name: "dns"
+        name: "{{ avi_dns_vs_name }}"
         application_profile_ref: "/api/applicationprofile/?name=System-DNS"
         network_profile_ref: "/api/networkprofile/?name=System-UDP-Per-Pkt"
         se_group_ref: "/api/serviceenginegroup/?name={{ dns_seg }}"
         services:
           - port: 53
         vsvip_ref: "/api/vsvip/?name=vsvip-dns"
+
+    # The controller's DNS virtual service (System settings > DNS Virtual Services), added with a PATCH.
+    - name: Update system config with DNS VS
+      vmware.alb.avi_systemconfiguration:
+        avi_credentials: "{{ avi_credentials | default(omit) }}"
+        api_context: "{{ avi_api_context | default(omit) }}"
+        avi_api_patch_op: add
+        avi_api_update_method: patch
+        dns_virtualservice_refs:
+          - "/api/virtualservice/?name={{ avi_dns_vs_name }}"
 
     - name: Create HTTP Virtualservice
       vmware.alb.avi_virtualservice:
