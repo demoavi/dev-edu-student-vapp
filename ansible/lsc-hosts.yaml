@@ -69,26 +69,6 @@
           - avi_version is defined and avi_version | length > 0
         fail_msg: "no lsc_hosts (hosts listed under the site in the CR) for site {{ site | default('?') }}"
 
-    # One entry per host. The attribute values keep the types of the known-good example: CPU is a
-    # string, MEMORY (GB) an integer, the two flags booleans. A host with a `seg` in the CR also gets
-    # a reference to its service engine group (hosts without one stay in Default-Group). The list is
-    # built under a name that is not an input variable: extra-vars cannot be overridden by set_fact.
-    - name: Define the SE host list
-      ansible.builtin.set_fact:
-        avi_lsc_se_hosts: >-
-          {{ avi_lsc_se_hosts | default([]) + [{
-               'host_attr': [
-                 {'attr_key': 'CPU', 'attr_val': (se_cpu | default(1)) | string},
-                 {'attr_key': 'MEMORY', 'attr_val': (se_memory_gb | default(2)) | int},
-                 {'attr_key': 'DPDK', 'attr_val': false},
-                 {'attr_key': 'SE_INBAND_MGMT', 'attr_val': false}],
-               'host_ip': {'type': 'V4', 'addr': item.address}} | combine(
-                 {'se_group_ref': '/api/serviceenginegroup/?name=' ~ item.seg ~ '&cloud_ref.name=' ~ avi_cloud_name}
-                 if (item.seg | default('') | length > 0) else {})] }}
-      loop: "{{ lsc_hosts }}"
-      loop_control:
-        label: "{{ item.name }} ({{ item.address }}, {{ item.seg | default('Default-Group', true) }})"
-
     # A service engine group belongs to a cloud, so the order matters: (1) the cloud is created without
     # hosts, (2) the groups listed in the CR are created, (3) the cloud is updated with its hosts, which
     # now can refer to their group.
@@ -114,6 +94,33 @@
         cloud_ref: "/api/cloud/?name={{ avi_cloud_name }}"
         name: "{{ item }}"
       loop: "{{ lsc_hosts | map(attribute='seg', default='') | select | unique | list }}"
+      register: avi_seg_results
+
+    - name: Get the uuid of each service engine group
+      ansible.builtin.set_fact:
+        avi_seg_uuids: "{{ dict(avi_seg_results.results | map(attribute='item') | zip(avi_seg_results.results | map(attribute='obj.uuid'))) }}"
+
+    # One entry per host. Every attribute value is a string (the controller answers "Unable to parse
+    # field attr_val in HostAttributes" to an integer or a boolean). A host with a `seg` in the CR also gets
+    # a reference to its service engine group by uuid (hosts without one stay in Default-Group): the
+    # controller rejects the name form (/api/serviceenginegroup/?name=..&cloud_ref.name=..) in a host entry
+    # ("Reference field se_group_uuid contains bad characters"). The list is
+    # built under a name that is not an input variable: extra-vars cannot be overridden by set_fact.
+    - name: Define the SE host list
+      ansible.builtin.set_fact:
+        avi_lsc_se_hosts: >-
+          {{ avi_lsc_se_hosts | default([]) + [{
+               'host_attr': [
+                 {'attr_key': 'CPU', 'attr_val': (se_cpu | default(1)) | string},
+                 {'attr_key': 'MEMORY', 'attr_val': (se_memory_gb | default(2)) | string},
+                 {'attr_key': 'DPDK', 'attr_val': 'false'},
+                 {'attr_key': 'SE_INBAND_MGMT', 'attr_val': 'false'}],
+               'host_ip': {'type': 'V4', 'addr': item.address}} | combine(
+                 {'se_group_ref': '/api/serviceenginegroup/' ~ avi_seg_uuids[item.seg]}
+                 if (item.seg | default('') | length > 0) else {})] }}
+      loop: "{{ lsc_hosts }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.address }}, {{ item.seg | default('Default-Group', true) }})"
 
     - name: Update the Linux server cloud with its hosts
       vmware.alb.avi_cloud:
