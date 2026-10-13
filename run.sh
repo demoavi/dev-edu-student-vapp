@@ -26,6 +26,8 @@
 #                     link), so they can appear long after this VM booted
 #   HOST_SSH_PORT     default 22
 #   LOG, STATE_DIR    log file and per-site success markers
+#   VCD_FILE          default /etc/avi-ansible/vcd.json (only on a destroyWhenDone VM): when every playbook
+#                     succeeded, run.sh sets a VM metadata key on this VM and the operator then deletes it
 : "${VARS_FILE:=/etc/avi-ansible/vars.json}"
 : "${AVI_READY_PATH:=/api/initial-data}"
 : "${READY_RETRIES:=90}"
@@ -146,6 +148,44 @@ wait_hosts() {
   done < <(site_host_addresses "${site}")
 }
 
+# tag_vm_done: when the operator gave this VM the VCD login (/etc/avi-ansible/vcd.json, written by
+# cloud-init from the CR's VCD connection; CR field destroyWhenDone), set the VM metadata key on the VM
+# itself. The operator sees it within ~2 minutes and deletes this VM - it only exists to run these
+# playbooks. Same relay as the gw's vcfi_machineId. The POST is checked by reading the key back and
+# retried: VCD drops a metadata write now and then (optimistic locking), and a silent miss would leave
+# the VM around forever. No file = nothing to do (a VM that is not meant to disappear). No credential
+# lives in this script: everything comes from that file.
+VCD_FILE="${VCD_FILE:-/etc/avi-ansible/vcd.json}"
+tag_vm_done() {
+  [ -r "${VCD_FILE}" ] || return 0
+  local host user password org api vm_href key token n=1
+  vcd_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "${VCD_FILE}" "$1"; }
+  host="$(vcd_field host)" && user="$(vcd_field user)" && password="$(vcd_field password)" && org="$(vcd_field org)" &&
+  api="$(vcd_field apiVersion)" && vm_href="$(vcd_field vm_href)" && key="$(vcd_field key)" ||
+    { log "cannot read ${VCD_FILE}, the VM is not tagged"; return 1; }
+  while [ "${n}" -le 5 ]; do
+    token="$(curl -ksS -X POST "https://${host}/cloudapi/1.0.0/sessions" \
+      -H "Authorization: Basic $(printf '%s' "${user}@${org}:${password}" | base64 -w0)" \
+      -H "Accept: application/json;version=${api}" \
+      -D - -o /dev/null | tr -d '\r' | awk -F': ' 'tolower($1) == "x-vmware-vcloud-access-token" {print $2}')"
+    if [ -n "${token}" ]; then
+      curl -ksS -o /dev/null -X POST "${vm_href}/metadata" \
+        -H "Authorization: Bearer ${token}" -H "Accept: application/*+xml;version=${api}" \
+        -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
+        --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>${key}</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>$(date -u +%FT%TZ)</Value></TypedValue></MetadataEntry></Metadata>"
+      sleep 5
+      if [ "$(curl -ksS -o /dev/null -w '%{http_code}' "${vm_href}/metadata/${key}" -H "Authorization: Bearer ${token}" -H "Accept: application/*+xml;version=${api}")" = "200" ]; then
+        log "tagged this VM with ${key}: the operator will delete it"
+        return 0
+      fi
+    fi
+    log "tagging this VM with ${key} failed (attempt ${n}/5)"
+    n=$((n + 1))
+    sleep 10
+  done
+  return 1
+}
+
 SITES="$(json_get '" ".join(d["sites"])')" || { log "bad vars file ${VARS_FILE}"; exit 1; }
 PLAYBOOKS="${AVI_PLAYBOOKS:-$(json_get '" ".join(d.get("playbooks") or ["base.yaml"])')}"
 failed=0
@@ -184,4 +224,5 @@ for site in ${SITES}; do
   cleanup
 done
 log "finished, ${failed} failure(s)"
+if [ "${failed}" -eq 0 ]; then tag_vm_done || failed=$((failed + 1)); fi
 [ "${failed}" -eq 0 ]
